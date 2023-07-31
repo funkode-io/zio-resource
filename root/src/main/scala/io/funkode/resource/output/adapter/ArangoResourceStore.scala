@@ -8,8 +8,6 @@ package io.funkode.resource
 package output
 package adapter
 
-import scala.deriving.Mirror
-
 import io.lemonlabs.uri.Urn
 import zio.*
 import zio.json.*
