@@ -10,7 +10,6 @@ package output
 import io.lemonlabs.uri.Urn
 import zio.*
 import zio.stream.*
-
 import io.funkode.resource.model.*
 import io.funkode.resource.model.Resource.Addressable
 
@@ -20,7 +19,7 @@ trait ResourceStore:
 
   def resourceModel: ResourceModel
 
-  def fetch(urn: Urn): ResourceStream[Resource]
+  def fetch(urn: Urn | Query): ResourceStream[Resource]
   def save(resource: Resource): ResourceApiCall[Resource]
   def delete(urn: Urn): ResourceApiCall[Resource]
   def link(leftUrn: Urn, relType: String, rightUrn: Urn): ResourceApiCall[Unit]
@@ -28,19 +27,19 @@ trait ResourceStore:
   def fetchRel(urn: Urn, relType: String): ResourceStream[Resource]
   def transaction[R](body: ResourceStore => ResourceApiCall[R]): ResourceApiCall[R]
 
-  def fetchOne(urn: Urn): ResourceApiCall[Resource] =
+  def fetchOne(urn: Urn | Query): ResourceApiCall[Resource] =
     fetch(urn).runHead.someOrFail(ResourceError.NotFoundError(urn, None))
 
-  inline def fetchAs[R](urn: Urn): ResourceStream[Resource.Of[R]] =
+  inline def fetchAs[R](urn: Urn | Query): ResourceStream[Resource.Of[R]] =
     fetch(urn).map(_.of[R])
 
-  inline def fetchAndConsume[R](urn: Urn): ResourceStream[Resource.InMemory[R]] =
+  inline def fetchAndConsume[R](urn: Urn | Query): ResourceStream[Resource.InMemory[R]] =
     fetch(urn).mapZIO(_.of[R].consume)
 
-  inline def fetchOneAs[R](urn: Urn): ResourceApiCall[Resource.Of[R]] =
+  inline def fetchOneAs[R](urn: Urn | Query): ResourceApiCall[Resource.Of[R]] =
     fetchOne(urn).map(_.of[R])
 
-  inline def fetchOneAndConsume[R](urn: Urn): ResourceApiCall[Resource.InMemory[R]] =
+  inline def fetchOneAndConsume[R](urn: Urn | Query): ResourceApiCall[Resource.InMemory[R]] =
     fetchOne(urn).flatMap(_.of[R].consume)
 
   inline def save[R: Resource.Addressable](
@@ -83,22 +82,23 @@ object ResourceStore:
   inline def withStreamStore[R](f: ResourceStore => WithResourceStreamStore[R]) =
     ZStream.service[ResourceStore].flatMap(f)
 
-  def fetch(urn: Urn): WithResourceStreamStore[Resource] = withStreamStore(_.fetch(urn))
+  def fetch(urn: Urn | Query): WithResourceStreamStore[Resource] = withStreamStore(_.fetch(urn))
 
-  def fetchOne(urn: Urn): WithResourceStore[Resource] = withStore(_.fetchOne(urn))
+  def fetchOne(urn: Urn | Query): WithResourceStore[Resource] = withStore(_.fetchOne(urn))
 
-  inline def fetchAs[R](urn: Urn): WithResourceStreamStore[Resource.Of[R]] = withStreamStore(
+  inline def fetchAs[R](urn: Urn | Query): WithResourceStreamStore[Resource.Of[R]] = withStreamStore(
     _.fetchAs[R](urn)
   )
-  inline def fetchAndConsume[R](urn: Urn): WithResourceStreamStore[Resource.InMemory[R]] = withStreamStore(
-    _.fetchAndConsume(urn)
-  )
+  inline def fetchAndConsume[R](urn: Urn | Query): WithResourceStreamStore[Resource.InMemory[R]] =
+    withStreamStore(
+      _.fetchAndConsume(urn)
+    )
 
-  inline def fetchOneAs[R](urn: Urn): WithResourceStore[Resource.Of[R]] = withStore(
+  inline def fetchOneAs[R](urn: Urn | Query): WithResourceStore[Resource.Of[R]] = withStore(
     _.fetchOneAs[R](urn)
   )
 
-  inline def fetchOneAndConsume[R](urn: Urn): WithResourceStore[Resource.InMemory[R]] = withStore(
+  inline def fetchOneAndConsume[R](urn: Urn | Query): WithResourceStore[Resource.InMemory[R]] = withStore(
     _.fetchOneAndConsume(urn)
   )
 
@@ -180,8 +180,16 @@ object ResourceStore:
 
     def resourceModel: ResourceModel = ResourceModel("in-mem", Map.empty)
 
-    def fetch(urn: Urn): ResourceStream[Resource] =
-      ZStream.fromZIO(ZIO.fromOption(storeMap.get(urn)).orElseFail(ResourceError.NotFoundError(urn)))
+    def fetch(urn: Urn | Query): ResourceStream[Resource] =
+      urn match
+        case urn: Urn =>
+          ZStream.fromZIO(ZIO.fromOption(storeMap.get(urn)).orElseFail(ResourceError.NotFoundError(urn)))
+        case _: Query =>
+          ZStream.fail(
+            ResourceError.UnderlinedError(
+              new NotImplementedError("Query is not implemented for in memory store")
+            )
+          )
 
     def save(resource: Resource): ResourceApiCall[Resource] =
       ZIO.fromOption(storeMap.put(resource.urn, resource)).orElse(ZIO.succeed(resource))

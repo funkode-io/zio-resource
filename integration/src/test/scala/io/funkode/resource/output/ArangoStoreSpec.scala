@@ -8,7 +8,6 @@ import zio.json.*
 import zio.json.ast.Json
 import zio.stream.*
 import zio.test.*
-
 import io.funkode.arangodb.*
 import io.funkode.arangodb.http.*
 import io.funkode.portfolio
@@ -16,6 +15,8 @@ import io.funkode.portfolio.model.*
 import io.funkode.resource.model.*
 import io.funkode.resource.model.Resource.*
 import adapter.ArangoResourceStore
+import io.funkode.velocypack.VPack
+import io.funkode.velocypack.VPack.VObject
 
 trait TransactionsExamples:
 
@@ -90,6 +91,17 @@ trait TransactionsExamples:
   val TransactionsRel = Relationship[Transaction]("transactions")
   val NetworkRel = Relationship[Network]("network")
 
+  val TransactionsInEthAfterTimestamp1Query = Query.Aql(
+    s"""
+       |FOR transaction, edge
+       |  IN OUTBOUND 'network/eth'
+       |  GRAPH 'portfolioTrait'
+       |  FILTER edge._rel == @relType and transaction.timestamp > @from
+       |RETURN transaction
+       |""".stripMargin,
+    Some(VObject("relType" -> VPack.VString("transactions"), "from" -> VPack.VSmallint(1)))
+  )
+
 object ArangoStoreSpec extends ZIOSpecDefault with TransactionsExamples:
 
   override def spec: Spec[TestEnvironment, Any] =
@@ -126,6 +138,7 @@ object ArangoStoreSpec extends ZIOSpecDefault with TransactionsExamples:
           _ <- ResourceStore.unlink(tx2.urn, "network", ethNetwork.urn)
           ethNetworkAfterUnlink <- ResourceStore.fetchOne(ethNetwork.urn)
           errorAfterUnlink <- ResourceStore.fetchOneRelAs[Network](tx2.urn, "network").flip
+          queryResults <- ResourceStore.fetchOneAndConsume[Transaction](TransactionsInEthAfterTimestamp1Query)
         yield assertTrue(storedNetwork == ethNetwork) &&
           assertTrue(storedNetwork == fetchedNetwork) &&
           assertTrue(fetchedNetworkJson.toJson == ethNetwornJsonString) &&
@@ -137,7 +150,8 @@ object ArangoStoreSpec extends ZIOSpecDefault with TransactionsExamples:
           assertTrue(networkTransactions.sortBy(_.timestamp) == Chunk(tx1, tx2)) &&
           assertTrue(netWorkTransactionsAfterDelete == Chunk(tx2)) &&
           assertTrue(ethNetworkAfterUnlink == ethNetworkAfterUnlink) &&
-          assertTrue(errorAfterUnlink == ResourceError.NotFoundError(tx2.urn))
+          assertTrue(errorAfterUnlink == ResourceError.NotFoundError(tx2.urn)) &&
+          assertTrue(queryResults.body == tx2)
       },
       test("Store inside transaction and commit") {
         for
