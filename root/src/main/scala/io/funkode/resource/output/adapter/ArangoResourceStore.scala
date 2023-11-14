@@ -17,14 +17,17 @@ import zio.stream.*
 import io.funkode.arangodb.http.*
 import io.funkode.arangodb.http.JsonCodecs.given
 import io.funkode.arangodb.model.*
+import io.funkode.arangodb.model.Query as ArangoQuery
 import io.funkode.resource.model.*
 import io.funkode.velocypack.VPack.*
+
+import io.funkode.resource.model.Query as ResourceQuery
 
 class InTransaction(store: ArangoResourceStore, transactionId: TransactionId) extends ResourceStore:
 
   def resourceModel: ResourceModel = store.resourceModel
 
-  def fetch(urn: Urn): ResourceStream[Resource] = store.fetchWithTx(urn)(Some(transactionId))
+  def fetch(urn: Urn | ResourceQuery): ResourceStream[Resource] = store.fetchWithTx(urn)(Some(transactionId))
 
   def save(resource: Resource): ResourceApiCall[Resource] = store.saveWithTx(resource)(Some(transactionId))
 
@@ -68,15 +71,28 @@ class ArangoResourceStore(db: ArangoDatabaseJson, storeModel: ResourceModel) ext
         val jsonFromStream = JsonDecoder[Json].decodeJsonStreamInput(byteStream).handleErrors(urn)
         ZStream.fromZIO(jsonFromStream.map(_.asResource))
 
-  def fetchWithTx(urn: Urn)(transaction: Option[TransactionId]): ResourceStream[Resource] =
-    db
-      .document(urn)
-      .readRaw(transaction = transaction)
-      .handleStreamErrors(urn)
-      .via(pureJsonPipeline(urn))
-      .orElseIfEmpty(ZStream.fail(ResourceError.NotFoundError(urn, None)))
+  def fetchWithTx(urnQuery: Urn | ResourceQuery)(
+      transaction: Option[TransactionId]
+  ): ResourceStream[Resource] =
+    urnQuery match
+      case urn: Urn =>
+        db
+          .document(urn)
+          .readRaw(transaction = transaction)
+          .handleStreamErrors(urn)
+          .via(pureJsonPipeline(urn))
+          .orElseIfEmpty(ZStream.fail(ResourceError.NotFoundError(urn, None)))
+      case ResourceQuery.Aql(queryString, bindVars) =>
+        val arangoQuery = ArangoQuery(queryString, bindVars)
+        val query = db.query(arangoQuery)
+        val queryWithTx = transaction.map(t => query.transaction(t)).getOrElse(query)
 
-  def fetch(urn: Urn): ResourceStream[Resource] =
+        queryWithTx
+          .stream[Json]
+          .map(json => json.asResource)
+          .handleStreamErrors(urnQuery)
+
+  def fetch(urn: Urn | ResourceQuery): ResourceStream[Resource] =
     fetchWithTx(urn)(None)
 
   def saveWithTx(resource: Resource)(transaction: Option[TransactionId]): ResourceApiCall[Resource] =
@@ -153,7 +169,7 @@ class ArangoResourceStore(db: ArangoDatabaseJson, storeModel: ResourceModel) ext
   ): Stream[ResourceError, Resource] =
     val query = db
       .query(
-        Query("FOR v, e IN OUTBOUND @startVertex @@edge FILTER e._rel == @relType RETURN v")
+        ArangoQuery("FOR v, e IN OUTBOUND @startVertex @@edge FILTER e._rel == @relType RETURN v")
           .bindVar("startVertex", VString(fromUrnToDocHandle(urn).unwrap))
           .bindVar("@edge", VString(relCollection(urn).unwrap))
           .bindVar("relType", VString(relType))
@@ -197,7 +213,7 @@ object ArangoResourceStore:
   given fromDocHandleToUrn: Conversion[DocumentHandle, Urn] = docHandle =>
     Urn.parse(s"urn:${docHandle.collection.unwrap}:${docHandle.key.unwrap}")
 
-  def handleArangoErrors(urn: Urn, t: Throwable): ResourceError = t match
+  def handleArangoErrors(urn: Urn | ResourceQuery, t: Throwable): ResourceError = t match
     case notFoundError @ ArangoError(404, _, _, _) => ResourceError.NotFoundError(urn, Some(notFoundError))
     case resourceError: ResourceError              => resourceError
     case otherError =>
@@ -221,7 +237,7 @@ object ArangoResourceStore:
       io.mapError(handleArangoErrors(urn, _))
 
   extension [R](stream: Stream[Throwable, R])
-    def handleStreamErrors(urn: Urn): ResourceStream[R] =
+    def handleStreamErrors(urn: Urn | ResourceQuery): ResourceStream[R] =
       stream.mapError(handleArangoErrors(urn, _))
 
   extension (json: Json)
